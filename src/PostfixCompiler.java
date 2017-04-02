@@ -1,166 +1,96 @@
-import com.sun.org.apache.bcel.internal.Constants;
-import com.sun.org.apache.bcel.internal.generic.*;
-
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Scanner;
 
 public class PostfixCompiler {
     
-    public static void main(String[] args) throws FileNotFoundException {
-        
-        new PostfixCompiler(args.length!=0 ? args[0] : "Postfix.postfix").output();
-        
-    }
-    
-    String filename;
-    
-    ArrayList<Token> expressions;
-    
-    int stackMax;
-    
-    ClassGen cg;
-    
-    public PostfixCompiler(String filename) {
-        this.filename = filename.replace(".postfix", "");
-        cg = new ClassGen(filename, "java/lang/Object", filename+".class",
-                Constants.ACC_PUBLIC | Constants.ACC_SUPER, new String[] {});
-        cg.addEmptyConstructor(Constants.ACC_PUBLIC);
-    }
-    
-    public void tokenize() {
-        Scanner in = null;
-        try {
-            in = new Scanner(new File(filename+".postfix"));
-        } catch (FileNotFoundException e) {
-            e.printStackTrace();
+    public static void main(String[] args) throws IOException {
+        if (args.length==0) {
+            System.out.println("No source file specified");
             return;
         }
+        if (!args[0].endsWith(".postfix")) {
+            System.out.println("Source files must end with .postfix");
+            return;
+        }
+        new PostfixCompiler(args[0]).compile();
+    }
     
-        expressions = new ArrayList<>();
+    private String filename;
     
-        stackMax = 0;
+    private PostfixClass postfixClass;
+    private PostfixMethod main;
     
+    public PostfixCompiler(String filename) {
+        this.filename = filename;
+        postfixClass = new PostfixClass(filename.replace(".postfix", ""));
+        postfixClass.addDefaultConstructor();
+        main = new PostfixMainMethod(postfixClass);
+    }
+    
+    private void parse() throws FileNotFoundException {
+        Scanner in = new Scanner(new File(filename));
         while (in.hasNextLine()) {
-            Token token = Token.BEGIN_EXPR;
-            expressions.add(token);
-            Scanner line = new Scanner(in.nextLine());
-            int stackCurr = 0;
-            while (line.hasNext()) {
-                if (line.hasNextFloat()) {
-                    Token c = new LiteralToken(line.nextFloat());
-                    stackCurr++;
-                    if (stackMax<stackCurr) stackMax = stackCurr;
-                    token.next = c;
-                    token = c;
-                } else {
-                    String operator = line.next();
-                    if (stackCurr < 2) throw new RuntimeException("Too few arguments for operator "+operator);
-                    Token c = new OperatorToken(operator);
-                    stackCurr--;
-                    token.next = c;
-                    token = c;
-                }
+            String line = in.nextLine();
+            if (line.endsWith("=")) {
+                line = line.substring(0, line.length()-1);
+                String name = line.substring(0, line.indexOf(' '));
+                line = line.substring(line.indexOf(' '));
+                main.addStatement(new VariableAssignmentToken(name, parseExpression(makeArrayList(line.split(" ")))));
+            } else {
+                //if it isn't assignment print it
+                main.addStatement(new PrintlnMethodCallToken(parseExpression(makeArrayList(line.split(" ")))));
             }
         }
     }
     
-    public void compile() {
+    public void compile() throws IOException {
+        parse();
+        postfixClass.compile().dump(new File(postfixClass.getClassGen().getFileName()));
+    }
     
-        InstructionList il = new InstructionList();
-        ConstantPoolGen cp = cg.getConstantPool();
-        
-        cp.addFieldref("java/lang/System", "out", "Ljava/io/PrintStream;");
-        cp.addMethodref("java/io/PrintStream", "println", "(F)V");
-        
-        for (Token head : expressions) {
-            Token curr = head.next;
-            il.append(new GETSTATIC(cp.lookupFieldref("java/lang/System", "out", "Ljava/io/PrintStream;")));
-            while (curr!=Token.END_EXPR) {
-                if (curr instanceof LiteralToken) {
-                    LiteralToken c = (LiteralToken)curr;
-                    int index = cp.lookupFloat(c.literal);
-                    if (index==-1) {
-                        index = cp.addFloat(c.literal);
-                    }
-                    il.append(new LDC(index));
-                } else {
-                    OperatorToken t = (OperatorToken)curr;
-                    String op = t.operator;
-                    if (op.equals("+")) {
-                        il.append(new FADD());
-                    }
-                    if (op.equals("-")) {
-                        il.append(new FSUB());
-                    }
-                    if (op.equals("*")) {
-                        il.append(new FMUL());
-                    }
-                    if (op.equals("/")) {
-                        il.append(new FDIV());
-                    }
-                    if (op.equals("%")) {
-                        il.append(new FREM());
-                    }
-                }
-                curr = curr.next;
-            }
-            il.append(new INVOKEVIRTUAL(cp.lookupMethodref("java/io/PrintStream", "println", "(F)V")));
+    private ExpressionToken parseExpression(ArrayList<String> line) {
+        if (line.size()==0) throw new RuntimeException("Tried to parse empty string");
+        String s = line.remove(line.size()-1);
+        if (s.matches("^\\d+$") || s.matches("^\\d*\\.\\d+$")) {
+            //only a number
+            return new LiteralToken(Float.parseFloat(s));
+        }
+        if (s.matches("^[A-z]+$")) {
+            //only a variable name
+            return new VariableLoadToken(s);
+        }
+        if (s.equals("*")) {
+            return new MultiplyToken(parseExpression(line), parseExpression(line));
+        }
+        if (s.equals("/")) {
+            return new DivideToken(parseExpression(line), parseExpression(line));
+        }
+        if (s.equals("+")) {
+            return new AddToken(parseExpression(line), parseExpression(line));
+        }
+        if (s.equals("-")) {
+            return new SubtractToken(parseExpression(line), parseExpression(line));
+        }
+        if (s.equals("%")) {
+            return new ModulusToken(parseExpression(line), parseExpression(line));
+        }
+        if (s.equals("=")) {
+            System.out.println();
+            ExpressionToken to = parseExpression(line);
+            return new VariableAssignmentExpressionToken(line.remove(line.size()-1), to);
         }
         
-        il.append(new RETURN());
-        
-        MethodGen main = new MethodGen(Constants.ACC_PUBLIC | Constants.ACC_STATIC, Type.VOID, new Type[] {new ArrayType(Type.STRING, 1)},
-                new String[] {"args"}, "main", filename.replace(".postfix", ""), il, cg.getConstantPool());
-        
-        //add 1 for reference to java.lang.System.out
-        main.setMaxStack(stackMax+1);
-        
-        cg.addMethod(main.getMethod());
+        throw new RuntimeException("Could not parse expression \""+line+"\"");
     }
     
-    public void output() {
-        tokenize();
-        compile();
-        try {
-            cg.getJavaClass().dump(new File(filename+".class"));
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-    
-}
-
-class Token {
-    
-    public static final Token END_EXPR = new Token();
-    
-    public static final Token BEGIN_EXPR = new Token();
-    
-    public Token next = END_EXPR;
-    
-    Token() {}
-    
-}
-
-class OperatorToken extends Token {
-    
-    public String operator;
-    
-    public OperatorToken(String operator) {
-        this.operator = operator;
-    }
-    
-}
-
-class LiteralToken extends Token {
-    
-    public float literal;
-    
-    public LiteralToken(float literal) {
-        this.literal = literal;
+    static ArrayList<String> makeArrayList(String[] line) {
+        ArrayList<String> ans = new ArrayList<>();
+        Collections.addAll(ans, line);
+        return ans;
     }
     
 }
